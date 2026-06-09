@@ -1,3 +1,5 @@
 .app_metadata
 reachy_mini_env
+reachy_mini_conversation_app_env
 .env
+.DS_Store

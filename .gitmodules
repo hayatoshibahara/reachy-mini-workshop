@@ -4,3 +4,6 @@
 [submodule "reachy_mini_conversation_app"]
 	path = reachy_mini_conversation_app
 	url = https://github.com/pollen-robotics/reachy_mini_conversation_app.git
+[submodule "speech-to-speech"]
+	path = speech-to-speech
+	url = https://github.com/huggingface/speech-to-speech.git
