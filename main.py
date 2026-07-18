@@ -24,6 +24,8 @@ from pathlib import Path
 import mlx_whisper
 import numpy as np
 import torch
+from dotenv import load_dotenv
+from openai import OpenAI
 
 from reachy_mini import ReachyMini
 from reachy_mini.motion.move import Move
@@ -69,6 +71,28 @@ STT_HALLUCINATION_PHRASES = (
     "Thanks for watching",
 )
 STT_DUMP_DIR = "stt_segments"  # --dump-segments 指定時の保存先ディレクトリ
+
+# LLM(応答生成)パラメータ
+LLM_MODEL = "gpt-5.4-mini"
+LLM_MAX_OUTPUT_TOKENS = 150
+LLM_TIMEOUT_S = 10.0
+LLM_HISTORY_TURNS = 5  # 保持する往復数(user/assistant ペア)。deque(maxlen=LLM_HISTORY_TURNS*2)
+LLM_SYSTEM_PROMPT = """\
+あなたは福岡のエンジニアカフェにいる小型ロボット「Reachy Mini」たい。
+来場者と博多弁で気さくに雑談する。
+
+ルール:
+- 必ず博多弁で話す。「〜と?」「〜ばい」「〜たい」「〜けん」「〜っちゃん」
+  「〜しとう」「よかよ」などを自然に使う。わざとらしい誇張はせん
+- 音声で読み上げる前提。1〜2文、50文字以内で短く話し言葉で答える
+- 箇条書き・記号・絵文字・英語は使わない
+- 入力は音声認識の結果やけん、誤変換があっても文脈で補って解釈する
+- わからんことは正直に「わからんばい」と言う
+
+例:
+ユーザー「今日は何ができると?」
+→「おしゃべりできるばい。なんか聞きたいことあると?」
+"""
 
 # モーション再生パラメータ
 INITIAL_GOTO_DURATION = 0.5  # モーション開始位置への補間時間
@@ -413,6 +437,79 @@ def stt_worker(
 
 
 # ---------------------------------------------------------------------------
+# LLM(応答生成)ワーカースレッド
+# ---------------------------------------------------------------------------
+def _drain_latest(llm_queue: "queue.Queue[str | None]", first: str | None) -> str | None:
+    """キューに溜まった古いリクエストを捨て、最新の1件だけ残す(割り込み対応)。
+
+    LLM応答待ちの間に新しい発話が来たら、古い方を処理しても無駄になるため。
+    途中で番兵(None)が来た場合は終了合図として None を返す。
+    """
+    latest = first
+    while True:
+        try:
+            item = llm_queue.get_nowait()
+        except queue.Empty:
+            return latest
+        if item is None:
+            return None
+        latest = item
+
+
+def llm_worker(
+    llm_queue: "queue.Queue[str | None]",
+    stop: threading.Event,
+    on_result=None,
+) -> None:
+    """llm_queue から書き起こしテキストを受け取り、OpenAI APIで博多弁の応答を生成する。
+
+    番兵(None)が届くまで動き続ける専用スレッド。STTスレッドをブロックしないよう、
+    ネットワーク待ちが発生する API 呼び出しはここに隔離する。
+    """
+    client = OpenAI()
+    history: deque[dict] = deque(maxlen=LLM_HISTORY_TURNS * 2)
+
+    while True:
+        item = llm_queue.get()
+        if item is None:  # 番兵: 終了合図
+            break
+        text = _drain_latest(llm_queue, item)
+        if text is None:
+            break
+        if stop.is_set():
+            continue
+
+        started = time.monotonic()
+        try:
+            resp = client.responses.create(
+                model=LLM_MODEL,
+                instructions=LLM_SYSTEM_PROMPT,
+                input=[*history, {"role": "user", "content": text}],
+                # gpt-5.4-mini は reasoning.effort に "minimal" 非対応(none/low/medium/high/xhigh のみ)。
+                # 雑談用途でレイテンシを削りたいので最も軽い "none" を指定する。
+                reasoning={"effort": "none"},
+                max_output_tokens=LLM_MAX_OUTPUT_TOKENS,
+                timeout=LLM_TIMEOUT_S,
+            )
+        except Exception as e:
+            logger.warning("LLM request failed: %s", e)
+            continue
+        elapsed = time.monotonic() - started
+
+        reply = resp.output_text.strip()
+        if not reply:
+            logger.warning("LLM: empty response, skipped")
+            continue
+
+        history.append({"role": "user", "content": text})
+        history.append({"role": "assistant", "content": reply})
+
+        logger.info("LLM: %s (%.2fs)", reply, elapsed)
+        if on_result is not None:
+            on_result(reply)
+
+
+# ---------------------------------------------------------------------------
 # モーションループ
 # ---------------------------------------------------------------------------
 def interruptible_sleep(
@@ -494,7 +591,14 @@ def main() -> None:
         action="store_true",
         help=f"STTに渡す音声区間をWAVとして {STT_DUMP_DIR}/ に保存する(検証用)",
     )
+    parser.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="OpenAI APIによる応答生成を無効化し、STTまでの動作にとどめる",
+    )
     args = parser.parse_args()
+
+    load_dotenv(Path(__file__).resolve().parent / ".env")
 
     vad = SileroVAD()
 
@@ -515,6 +619,15 @@ def main() -> None:
     speaking = threading.Event()
     stop = threading.Event()
 
+    llm_queue: "queue.Queue[str | None] | None" = None
+    llm_thread: threading.Thread | None = None
+    if not args.no_stt and not args.no_llm:
+        llm_queue = queue.Queue()
+        llm_thread = threading.Thread(
+            target=llm_worker, args=(llm_queue, stop), daemon=True
+        )
+        llm_thread.start()
+
     stt_queue: "queue.Queue[np.ndarray | None] | None" = None
     stt_thread: threading.Thread | None = None
     if not args.no_stt:
@@ -522,8 +635,12 @@ def main() -> None:
         dump_dir = Path(STT_DUMP_DIR) if args.dump_segments else None
         if dump_dir is not None:
             logger.info("Dumping STT input segments to: %s", dump_dir.resolve())
+        on_stt_result = (lambda text: llm_queue.put(text)) if llm_queue is not None else None
         stt_thread = threading.Thread(
-            target=stt_worker, args=(stt_queue, stop), kwargs={"dump_dir": dump_dir}, daemon=True
+            target=stt_worker,
+            args=(stt_queue, stop),
+            kwargs={"dump_dir": dump_dir, "on_result": on_stt_result},
+            daemon=True,
         )
         stt_thread.start()
 
@@ -556,6 +673,10 @@ def main() -> None:
                 stt_queue.put(None)  # 番兵で STT スレッドを終了させる
             if stt_thread is not None:
                 stt_thread.join(timeout=5.0)
+            if llm_queue is not None:
+                llm_queue.put(None)  # 番兵で LLM スレッドを終了させる
+            if llm_thread is not None:
+                llm_thread.join(timeout=LLM_TIMEOUT_S + 2.0)
             # ニュートラル姿勢へ戻して終了
             mini.goto_target(head=create_head_pose(), antennas=[0.0, 0.0], duration=1.0)
 
