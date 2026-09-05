@@ -6,3 +6,4 @@
 *.wav
 gstreamer
 *.mp4
+__pycache__

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import queue
 import random
@@ -39,10 +40,74 @@ logger = logging.getLogger("vad_motion")
 # 設定
 # ---------------------------------------------------------------------------
 EMOTIONS_DATASET = "pollen-robotics/reachy-mini-emotions-library"
+DANCES_DATASET = "pollen-robotics/reachy-mini-dances-library"
 
 # 発話中プール(傾聴・相槌系)
 TALKING_POOL = ("attentive1", "attentive2", "yes1", "understanding2")
 # 待機はカスタムの IdleMove(ゆっくり顔を動かす+アンテナスウェイ)を使用
+
+# --- 応答モーション(B案: LLMは intent を選び、コード側で move 名に解決する) ---
+# 対応表は conversation_app の play_emotion.py (_INTENT_TO_MOVES) から移植。
+# 人間がキュレーション済みの move だけが載っているので、低品質な動きは混ざらない。
+# dance 系には dances library の全19種を追加で割り当てる。
+DANCE_MOVES = (
+    "chicken_peck", "chin_lead", "dizzy_spin", "grid_snap",
+    "groovy_sway_and_roll", "head_tilt_roll", "interwoven_spirals",
+    "jackson_square", "neck_recoil", "pendulum_swing", "polyrhythm_combo",
+    "sharp_side_tilt", "side_glance_flick", "side_peekaboo",
+    "side_to_side_sway", "simple_nod", "stumble_and_recover",
+    "uh_huh_tilt", "yeah_nod",
+)
+
+INTENT_TO_MOVES: dict[str, tuple[str, ...]] = {
+    "happy": ("laughing2", "laughing1"),
+    "excited": ("dance3", "dance2"),
+    "loving": ("loving1",),
+    "grateful": ("grateful1",),
+    "success": ("success1", "success2"),
+    "thinking": ("thoughtful1", "thoughtful2"),
+    "attentive": ("attentive1", "attentive2"),
+    "confused": ("confused1",),
+    "uncertain": ("uncertain1",),
+    "sad": ("sad1", "sad2", "downcast1"),
+    "downcast": ("downcast1", "sad1"),
+    "lonely": ("lonely1",),
+    "angry": ("rage1", "irritated2", "irritated1"),
+    "irritated": ("irritated1", "irritated2", "displeased2"),
+    "displeased": ("displeased1", "displeased2"),
+    "disgusted": ("disgusted1",),
+    "scared": ("scared1", "fear1", "anxiety1"),
+    "anxious": ("anxiety1", "fear1", "scared1"),
+    "surprised": ("surprised1", "surprised2", "amazed1"),
+    "amazed": ("amazed1", "surprised1"),
+    "calming": ("calming1",),
+    "relief": ("relief1", "relief2"),
+    "impatient": ("impatient2",),
+    "embarrassed": ("shy1",),
+    "bored": ("boredom2", "boredom1"),
+    "tired": ("exhausted1", "sleep1"),
+    "sleepy": ("sleep1", "exhausted1"),
+    "yes": ("yes1", "understanding2"),
+    "yes_understanding": ("understanding2",),
+    "no": ("no1",),
+    "no_sad": ("no_sad1",),
+    "no_excited": ("no_excited1",),
+    "no_firm": ("no1",),
+    "welcoming": ("welcoming2",),
+    "greeting": ("welcoming2",),
+    "goodbye": ("loving1", "welcoming2"),
+    "go_away": ("go_away1",),
+    "helpful": ("helpful1",),
+    "dance": ("dance1", "dance2", "dance3") + DANCE_MOVES,
+    "electric": ("electric1",),
+    "dying": ("dying1",),
+}
+
+# intent 一覧は対応表から導出する(リストと対応表のズレを構造的に防ぐ)
+EMOTION_INTENTS: tuple[str, ...] = ("random", *INTENT_TO_MOVES)
+ALL_INTENT_MOVES: frozenset[str] = frozenset().union(*INTENT_TO_MOVES.values())
+RESPONSE_FALLBACK_MOVE = "attentive1"  # intent 解決に失敗した時の無難な相槌
+RESPONSE_MOVE_SOUND = True  # 応答モーション付属の効果音を鳴らす(うるさければ False)
 
 # VAD パラメータ(test_vad_wav.py / conversation_app に準拠)
 VAD_SAMPLE_RATE = 16000  # Silero の要件
@@ -74,7 +139,7 @@ STT_DUMP_DIR = "stt_segments"  # --dump-segments 指定時の保存先ディレ�
 
 # LLM(応答生成)パラメータ
 LLM_MODEL = "gpt-5.4-mini"
-LLM_MAX_OUTPUT_TOKENS = 150
+LLM_MAX_OUTPUT_TOKENS = 200  # JSON(reply + intent)の分だけ余裕を持たせる
 LLM_TIMEOUT_S = 10.0
 LLM_HISTORY_TURNS = 5  # 保持する往復数(user/assistant ペア)。deque(maxlen=LLM_HISTORY_TURNS*2)
 LLM_SYSTEM_PROMPT = """\
@@ -92,7 +157,30 @@ LLM_SYSTEM_PROMPT = """\
 例:
 ユーザー「今日は何ができると?」
 →「おしゃべりできるばい。なんか聞きたいことあると?」
+
+応答と同時に、内容に合う感情・動きを intent から1つ選ぶ。
+楽しい話や音楽の話なら dance、質問されて考えるときは thinking、
+褒められたら happy や grateful、挨拶なら greeting、のように
+応答の気分と一致させる。迷ったら attentive を選ぶ。
 """
+
+# Structured Outputs 用スキーマ: モーション名の幻覚を構造的に防ぐ
+LLM_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reply": {
+            "type": "string",
+            "description": "博多弁の応答(1〜2文、50文字以内)",
+        },
+        "intent": {
+            "type": "string",
+            "enum": list(EMOTION_INTENTS),
+            "description": "応答の気分に合う動きの意図",
+        },
+    },
+    "required": ["reply", "intent"],
+    "additionalProperties": False,
+}
 
 # モーション再生パラメータ
 INITIAL_GOTO_DURATION = 0.5  # モーション開始位置への補間時間
@@ -463,8 +551,10 @@ def llm_worker(
 ) -> None:
     """llm_queue から書き起こしテキストを受け取り、OpenAI APIで博多弁の応答を生成する。
 
+    Structured Outputs で {"reply": 博多弁テキスト, "intent": 動きの意図} を出させる。
     番兵(None)が届くまで動き続ける専用スレッド。STTスレッドをブロックしないよう、
     ネットワーク待ちが発生する API 呼び出しはここに隔離する。
+    on_result には (reply, intent) が渡される。
     """
     client = OpenAI()
     history: deque[dict] = deque(maxlen=LLM_HISTORY_TURNS * 2)
@@ -485,6 +575,14 @@ def llm_worker(
                 model=LLM_MODEL,
                 instructions=LLM_SYSTEM_PROMPT,
                 input=[*history, {"role": "user", "content": text}],
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": "reply_with_motion",
+                        "schema": LLM_RESPONSE_SCHEMA,
+                        "strict": True,
+                    }
+                },
                 # gpt-5.4-mini は reasoning.effort に "minimal" 非対応(none/low/medium/high/xhigh のみ)。
                 # 雑談用途でレイテンシを削りたいので最も軽い "none" を指定する。
                 reasoning={"effort": "none"},
@@ -496,17 +594,39 @@ def llm_worker(
             continue
         elapsed = time.monotonic() - started
 
-        reply = resp.output_text.strip()
+        try:
+            data = json.loads(resp.output_text)
+        except json.JSONDecodeError as e:
+            logger.warning("LLM: invalid JSON output (%s): %r", e, resp.output_text[:200])
+            continue
+        reply = str(data.get("reply", "")).strip()
+        intent = str(data.get("intent", "")).strip()
         if not reply:
-            logger.warning("LLM: empty response, skipped")
+            logger.warning("LLM: empty reply, skipped")
             continue
 
+        # 履歴にはテキストだけを残す(intent まで入れると caching 効率と品質を下げる)
         history.append({"role": "user", "content": text})
         history.append({"role": "assistant", "content": reply})
 
-        logger.info("LLM: %s (%.2fs)", reply, elapsed)
+        logger.info("LLM: %s [intent=%s] (%.2fs)", reply, intent, elapsed)
         if on_result is not None:
-            on_result(reply)
+            on_result(reply, intent)
+
+
+def resolve_intent_move(intent: str, moves: dict[str, object]) -> str | None:
+    """intent をロード済みの move 名に解決する(candidates からランダム選択)。
+
+    "random" や未知の intent は全応答モーションから選ぶ。
+    候補が1つもロードされていなければフォールバックの相槌を返す。
+    """
+    candidates = INTENT_TO_MOVES.get(intent) or tuple(ALL_INTENT_MOVES)
+    valid = [n for n in candidates if n in moves]
+    if valid:
+        return random.choice(valid)
+    if RESPONSE_FALLBACK_MOVE in moves:
+        return RESPONSE_FALLBACK_MOVE
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -517,13 +637,28 @@ def interruptible_sleep(
     speaking: threading.Event,
     stop: threading.Event,
     was_speaking: bool,
+    response_queue: "queue.Queue[str] | None" = None,
 ) -> None:
-    """speaking の状態が was_speaking から変化するか stop されるまで最大 duration 秒待つ。"""
+    """speaking の状態変化・stop・応答モーション到着のいずれかまで最大 duration 秒待つ。"""
     deadline = time.monotonic() + duration
     while time.monotonic() < deadline:
         if stop.is_set() or speaking.is_set() != was_speaking:
             return
+        if response_queue is not None and not response_queue.empty():
+            return
         time.sleep(0.05)
+
+
+def _pop_latest(response_queue: "queue.Queue[str] | None") -> str | None:
+    """response_queue に溜まった応答モーションのうち最新の1件だけを取り出す。"""
+    if response_queue is None:
+        return None
+    latest: str | None = None
+    while True:
+        try:
+            latest = response_queue.get_nowait()
+        except queue.Empty:
+            return latest
 
 
 def motion_loop(
@@ -531,9 +666,11 @@ def motion_loop(
     moves: dict[str, object],
     speaking: threading.Event,
     stop: threading.Event,
+    response_queue: "queue.Queue[str] | None" = None,
 ) -> None:
     """現在の状態に応じたモーションを再生し続ける。
 
+    - response: LLM応答に紐づくモーションが届いていれば最優先で1回再生。
     - idle: IdleMove(無限ループ)を1回 play_move する。発話検出の cancel で戻ってくる。
     - talking: TALKING_POOL からランダムに選んで再生し、間にポーズを挟む。
     """
@@ -541,6 +678,21 @@ def motion_loop(
     prev_name: str | None = None
 
     while not stop.is_set():
+        # --- 応答モーション(LLMの intent 由来)を最優先で再生 ---
+        response_name = _pop_latest(response_queue)
+        if response_name is not None:
+            logger.info("Playing %s (response)", response_name)
+            try:
+                mini.play_move(
+                    moves[response_name],
+                    initial_goto_duration=INITIAL_GOTO_DURATION,
+                    sound=RESPONSE_MOVE_SOUND,
+                )
+            except Exception as e:
+                logger.warning("response play_move failed for %s: %s", response_name, e)
+                time.sleep(0.5)
+            continue
+
         if not speaking.is_set():
             # --- 待機: カスタムループモーション(cancel されるまで再生され続ける) ---
             logger.info("Playing idle loop")
@@ -565,10 +717,12 @@ def motion_loop(
             time.sleep(0.5)
             continue
 
-        # モーション間にポーズを挟む(状態変化で即中断)。
+        # モーション間にポーズを挟む(状態変化・応答モーション到着で即中断)。
         # サーボ静音の時間を作って VAD が無音を検出できるようにする意味もある。
         if not stop.is_set():
-            interruptible_sleep(random.uniform(*TALKING_PAUSE_RANGE), speaking, stop, True)
+            interruptible_sleep(
+                random.uniform(*TALKING_PAUSE_RANGE), speaking, stop, True, response_queue
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -605,47 +759,84 @@ def main() -> None:
     if not args.no_stt:
         stt_warmup()
 
+    llm_enabled = not args.no_stt and not args.no_llm
+
     moves: dict[str, object] = {}
     if not args.no_motion:
         logger.info("Loading emotions library: %s", EMOTIONS_DATASET)
-        emotions = RecordedMoves(EMOTIONS_DATASET)
-        available = set(emotions.list_moves())
-        missing = [n for n in TALKING_POOL if n not in available]
+        libraries = [RecordedMoves(EMOTIONS_DATASET)]
+        if llm_enabled:
+            logger.info("Loading dances library: %s", DANCES_DATASET)
+            libraries.append(RecordedMoves(DANCES_DATASET))
+
+        # 両ライブラリの move 名 → ライブラリの対応(名前衝突は先勝ち = emotions 優先)
+        available: dict[str, RecordedMoves] = {}
+        for lib in libraries:
+            for n in lib.list_moves():
+                available.setdefault(n, lib)
+
+        missing_talking = [n for n in TALKING_POOL if n not in available]
+        if missing_talking:
+            raise ValueError(f"Moves not found in {EMOTIONS_DATASET}: {missing_talking}")
+
+        needed = set(TALKING_POOL)
+        if llm_enabled:
+            needed |= ALL_INTENT_MOVES
+        missing = sorted(n for n in needed if n not in available)
         if missing:
-            raise ValueError(f"Moves not found in {EMOTIONS_DATASET}: {missing}")
-        moves = {name: emotions.get(name) for name in TALKING_POOL}
+            # 応答モーションの欠落は起動を止めず、対応表から外すだけにする
+            logger.warning("Moves not found in libraries (skipped): %s", missing)
+        moves = {n: available[n].get(n) for n in needed if n in available}
         logger.info("Loaded %d moves", len(moves))
 
     speaking = threading.Event()
     stop = threading.Event()
 
-    llm_queue: "queue.Queue[str | None] | None" = None
-    llm_thread: threading.Thread | None = None
-    if not args.no_stt and not args.no_llm:
-        llm_queue = queue.Queue()
-        llm_thread = threading.Thread(
-            target=llm_worker, args=(llm_queue, stop), daemon=True
-        )
-        llm_thread.start()
-
-    stt_queue: "queue.Queue[np.ndarray | None] | None" = None
-    stt_thread: threading.Thread | None = None
-    if not args.no_stt:
-        stt_queue = queue.Queue()
-        dump_dir = Path(STT_DUMP_DIR) if args.dump_segments else None
-        if dump_dir is not None:
-            logger.info("Dumping STT input segments to: %s", dump_dir.resolve())
-        on_stt_result = (lambda text: llm_queue.put(text)) if llm_queue is not None else None
-        stt_thread = threading.Thread(
-            target=stt_worker,
-            args=(stt_queue, stop),
-            kwargs={"dump_dir": dump_dir, "on_result": on_stt_result},
-            daemon=True,
-        )
-        stt_thread.start()
-
     with ReachyMini() as mini:
         logger.info("Connected to Reachy Mini")
+
+        # 応答モーション: LLM の intent を move 名に解決して motion_loop へ渡すキュー
+        response_queue: "queue.Queue[str] | None" = None
+        if llm_enabled and not args.no_motion:
+            response_queue = queue.Queue()
+
+        def on_llm_result(reply: str, intent: str) -> None:
+            if response_queue is None:
+                return
+            name = resolve_intent_move(intent, moves)
+            if name is None:
+                return
+            response_queue.put(name)
+            # idle 再生(無限ループ)を中断して応答モーションへ即切替
+            cancel_current_move(mini)
+
+        llm_queue: "queue.Queue[str | None] | None" = None
+        llm_thread: threading.Thread | None = None
+        if llm_enabled:
+            llm_queue = queue.Queue()
+            llm_thread = threading.Thread(
+                target=llm_worker,
+                args=(llm_queue, stop),
+                kwargs={"on_result": on_llm_result},
+                daemon=True,
+            )
+            llm_thread.start()
+
+        stt_queue: "queue.Queue[np.ndarray | None] | None" = None
+        stt_thread: threading.Thread | None = None
+        if not args.no_stt:
+            stt_queue = queue.Queue()
+            dump_dir = Path(STT_DUMP_DIR) if args.dump_segments else None
+            if dump_dir is not None:
+                logger.info("Dumping STT input segments to: %s", dump_dir.resolve())
+            on_stt_result = (lambda text: llm_queue.put(text)) if llm_queue is not None else None
+            stt_thread = threading.Thread(
+                target=stt_worker,
+                args=(stt_queue, stop),
+                kwargs={"dump_dir": dump_dir, "on_result": on_stt_result},
+                daemon=True,
+            )
+            stt_thread.start()
 
         mini.media.start_recording()
         vad_thread = threading.Thread(
@@ -661,7 +852,7 @@ def main() -> None:
                 while True:
                     time.sleep(0.5)
             else:
-                motion_loop(mini, moves, speaking, stop)
+                motion_loop(mini, moves, speaking, stop, response_queue)
         except KeyboardInterrupt:
             logger.info("Shutting down...")
         finally:
