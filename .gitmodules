@@ -7,3 +7,6 @@
 [submodule "speech-to-speech"]
 	path = speech-to-speech
 	url = https://github.com/huggingface/speech-to-speech.git
+[submodule "openai-openapi"]
+	path = openai-openapi
+	url = https://github.com/openai/openai-openapi.git
