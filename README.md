@@ -2,14 +2,18 @@
 
 ## 概要
 
-1. [Reachy Mini SDK](1_reachy_mini_sdk.ipynb)
+Reachy Mini SDK と OpenAI API を使い、シンプルなカスケード型パイプラインを構築するワークショップの資料です。
 
+## 資料
 
-```sh
-GST_DEBUG="2,v4l2src:6,jpegdec:5,GST_CAPS:5" \
-  reachy-mini-daemon --log-level DEBUG --log-file /tmp/reachy_daemon.log
-```
+- [GitHub](https://github.com/hayatoshibahara/reachy-mini-workshop/blob/main/main.ipynb)
+- [Google Colab](https://colab.research.google.com/github/hayatoshibahara/reachy-mini-workshop/blob/main/main.ipynb)
 
-```sh
-reachy-mini-daemon --no-wake-up-on-start
-```
+## 使い方
+
+1. リポジトリをローカル環境にダウンロード
+  ```sh
+  git clone https://github.com/hayatoshibahara/reachy-mini-workshop.git
+  ```
+2. [Visual Studio Code](https://code.visualstudio.com/) をインストールし、ダウンロードしたリポジトリを開く
+3. `main.ipynb` を開き、開発をはじめる
