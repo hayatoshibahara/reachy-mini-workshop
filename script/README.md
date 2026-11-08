@@ -17,9 +17,11 @@ source .reachy_mini_env/bin/activate        # 🍎 macOS
 git submodule update --init reachy_mini
 uv pip install -e "./reachy_mini[mujoco]"
 
-# スクリプトが使う追加パッケージ
-uv pip install soundfile matplotlib python-dotenv openai scipy torch torchaudio pillow
+# スクリプトが使う追加パッケージ（実行前に必ずインストール）
+uv pip install soundfile python-dotenv openai torch torchaudio pillow
 ```
+
+インストールしていないと、スクリプトの実行時に `ModuleNotFoundError: No module named 'soundfile'` のようなエラーになります。その場合は、仮想環境を有効化した状態で、足りないパッケージを `uv pip install` で追加してください。
 
 OpenAI API を使うスクリプト（`07`〜`09`、`11`〜`13`）のために、リポジトリ直下に `.env` を作成します。
 
@@ -56,7 +58,7 @@ python script/01_move.py
 | `03_devices.py` | デバイス一覧、音量設定、カメラ仕様 | |
 | `04_record.py` | 5 秒録音して検証し、`recorded.wav` に保存 | |
 | `05_play.py` | `recorded.wav` をスピーカーで再生 | 先に `04` |
-| `06_camera.py` | カメラで 1 枚撮影して表示 | |
+| `06_camera.py` | カメラで 1 枚撮影し、画像の情報を表示 | |
 | `07_transcribe.py` | `recorded.wav` を文字起こし | 先に `04`、API キー |
 | `08_response.py [テキスト]` | 文字起こしして回答を生成 | 先に `04`（テキスト指定なら不要）、API キー |
 | `09_tts.py [テキスト]` | 音声を生成して再生 | API キー |
@@ -156,7 +158,7 @@ gst-inspect-1.0 webrtcsink   # プラグインが見つかること
 
 SDK は Linux で `PyGObject` を pip でビルドして使います。JetPack 標準の `python3-gi` は Python 3.10 用なので、Python 3.12 の仮想環境からは使えません。手順 1 の `libgirepository1.0-dev` と `libcairo2-dev` を入れたうえで、`uv pip install -e "./reachy_mini[mujoco]"` の中でビルドさせます。
 
-インストール後は `python script/02_gstreamer.py` で、全プラグインが ✅ になることを確認します。
+インストール後は、上の「インストール」の追加パッケージ（`soundfile` など）も入れたうえで、`python script/02_gstreamer.py` で全プラグインが ✅ になることを確認します。
 
 ### 4. その他の注意
 
