@@ -13,9 +13,8 @@ uv venv .reachy_mini_env --seed --python 3.12
 source .reachy_mini_env/bin/activate        # 🍎 macOS
 .reachy_mini_env\Scripts\activate           # 🪟 Windows
 
-# Reachy Mini SDK v1.10.0 を取得してインストール
-git clone https://github.com/pollen-robotics/reachy_mini.git
-git -C reachy_mini checkout v1.10.0
+# Reachy Mini SDK（サブモジュール、v1.14.0）を取得してインストール
+git submodule update --init reachy_mini
 uv pip install -e "./reachy_mini[mujoco]"
 
 # スクリプトが使う追加パッケージ
@@ -76,7 +75,7 @@ python script/01_move.py
 
 ## Jetson Orin Nano でのインストール
 
-Jetson（JetPack 6 / Ubuntu 22.04 / aarch64）は Linux 扱いのため、macOS・Windows と違って GStreamer が同梱されず、手動の追加対応が必要です。以下は [Reachy Mini SDK の GStreamer インストール手順](https://github.com/pollen-robotics/reachy_mini/blob/v1.10.0/docs/source/SDK/gstreamer-installation.md)を Jetson 向けに読み替えたもので、Jetson 実機での動作確認はしていません。
+Jetson（JetPack 6 / Ubuntu 22.04 / aarch64）は Linux 扱いのため、macOS・Windows と違って GStreamer が同梱されず、手動の追加対応が必要です。以下は [Reachy Mini SDK の GStreamer インストール手順](https://github.com/pollen-robotics/reachy_mini/blob/v1.14.0/docs/source/SDK/gstreamer-installation.md)を Jetson 向けに読み替えたもので、Jetson 実機での動作確認はしていません。
 
 ### 0. 現在の GStreamer を確認する
 
