@@ -156,11 +156,25 @@ def synthesize(client, text, path, voice="marin", instructions="ポジティブ�
         tts_response.stream_to_file(path)
 
 
+def get_frame(mini, timeout: float = 2.0):
+    """カメラ画像を1枚取得する（BGR, shape (H, W, 3)）。取れなければ None。
+
+    mini.media.get_frame() は 20ms しか待たないため、接続した直後は最初の画像が
+    まだ届いておらず None になることがある。届くまで少しのあいだ繰り返す。
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        frame = mini.media.get_frame()
+        if frame is not None or time.monotonic() > deadline:
+            return frame
+        time.sleep(0.05)
+
+
 def capture_camera_image_data_url(mini) -> str:
     """カメラ画像を1枚取得し、data URL（JPEG, base64）にして返す。"""
     from PIL import Image
 
-    frame = mini.media.get_frame()  # BGR, shape (H, W, 3)
+    frame = get_frame(mini)  # BGR, shape (H, W, 3)
     if frame is None:
         raise RuntimeError("カメラ画像を取得できませんでした。")
 

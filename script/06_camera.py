@@ -3,8 +3,10 @@
 import numpy as np
 from reachy_mini import ReachyMini
 
+from common import get_frame
+
 with ReachyMini(media_backend="default") as mini:
-    frame = mini.media.get_frame()
+    frame = get_frame(mini)
 
 if frame is None:
     print("❌ カメラ画像を取得できませんでした（None）")
