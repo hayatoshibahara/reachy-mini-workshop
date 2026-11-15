@@ -66,7 +66,7 @@ done
 echo "デーモンの状態: ${state:-不明}"
 
 if ! pgrep -f "viewer/server.py" > /dev/null; then
-    nohup python viewer/server.py --scene "$SCENE" --camera "$CAMERA" > /tmp/viewer.log 2>&1 &
+    nohup python -u viewer/server.py --scene "$SCENE" --camera "$CAMERA" > /tmp/viewer.log 2>&1 &
 fi
 
 echo "シミュレータを起動しました（シーン: $SCENE、カメラ: $CAMERA）。ビューア: ポート 8080"
